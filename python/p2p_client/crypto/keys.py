@@ -112,7 +112,8 @@ class SessionKey:
     def __init__(self):
         self._priv = X25519PrivateKey.generate()
         self._pub  = self._priv.public_key()
-        self._aes: AESGCM | None = None
+        self._send_aes: AESGCM | None = None
+        self._recv_aes: AESGCM | None = None
 
     def public_b64(self) -> str:
         raw = self._pub.public_bytes(
@@ -129,31 +130,46 @@ class SessionKey:
         peer_pub = X25519PublicKey.from_public_bytes(peer_raw)
         shared   = self._priv.exchange(peer_pub)
 
-        info = b"initiator-to-responder" if initiator else b"responder-to-initiator"
-        key  = HKDF(
+        if initiator:
+            send_info = b"initiator-to-responder"
+            recv_info = b"responder-to-initiator"
+        else:
+            send_info = b"responder-to-initiator"
+            recv_info = b"initiator-to-responder"
+
+        send_key = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
             salt=None,
-            info=info,
+            info=send_info,
         ).derive(shared)
-        self._aes = AESGCM(key)
+
+        recv_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=None,
+            info=recv_info,
+        ).derive(shared)
+
+        self._send_aes = AESGCM(send_key)
+        self._recv_aes = AESGCM(recv_key)
 
     # -- Encrypt / decrypt --------------------------------------------------
 
     def encrypt(self, plaintext: bytes) -> dict:
         """Returns {"nonce": b64, "ct": b64}"""
-        if self._aes is None:
+        if self._send_aes is None:
             raise RuntimeError("Session key not derived yet")
         nonce = os.urandom(12)
-        ct    = self._aes.encrypt(nonce, plaintext, None)
+        ct    = self._send_aes.encrypt(nonce, plaintext, None)
         return {"nonce": _b64e(nonce), "ct": _b64e(ct)}
 
     def decrypt(self, nonce_b64: str, ct_b64: str) -> bytes:
-        if self._aes is None:
+        if self._recv_aes is None:
             raise RuntimeError("Session key not derived yet")
         nonce = _b64d(nonce_b64)
         ct    = _b64d(ct_b64)
-        return self._aes.decrypt(nonce, ct, None)
+        return self._recv_aes.decrypt(nonce, ct, None)
 
 
 # ---------------------------------------------------------------------------

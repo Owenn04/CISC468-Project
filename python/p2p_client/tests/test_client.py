@@ -382,7 +382,7 @@ class TestIntegration:
 
     def test_list_files(self, tmp):
         (ia, ca, sa, ra, ib, cb, sb, rb) = self._setup_peers(tmp)
-        (sa / "hello.txt").write_bytes(b"hi there")
+        (sb / "hello.txt").write_bytes(b"hi there")
 
         conn_a, conn_b = _make_connection_pair(
             "alice", ia, ca, sa, ra,

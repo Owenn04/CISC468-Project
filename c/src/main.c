@@ -200,6 +200,32 @@ static int split_command(char *line, char **parts, int max_parts) {
     return count;
 }
 
+static void contact_pub_path(const char *peer_name, char *path, size_t path_size) {
+    if (path == NULL || path_size == 0) {
+        return;
+    }
+
+    if (peer_name == NULL) {
+        path[0] = '\0';
+        return;
+    }
+
+    snprintf(path, path_size, "data/contacts/%s.pub", peer_name);
+}
+
+static void contact_verified_path(const char *peer_name, char *path, size_t path_size) {
+    if (path == NULL || path_size == 0) {
+        return;
+    }
+
+    if (peer_name == NULL) {
+        path[0] = '\0';
+        return;
+    }
+
+    snprintf(path, path_size, "data/contacts/%s.verified", peer_name);
+}
+
 static int contact_exists(const char *peer_name) {
     char path[P2P_MAX_PATH_LEN];
 
@@ -207,7 +233,7 @@ static int contact_exists(const char *peer_name) {
         return 0;
     }
 
-    snprintf(path, sizeof(path), "data/contacts/%s.pub", peer_name);
+    contact_pub_path(peer_name, path, sizeof(path));
     return access(path, F_OK) == 0;
 }
 
@@ -219,7 +245,7 @@ static int save_contact_key(const char *peer_name, const char *identity_pub_b64)
         return P2P_ERR;
     }
 
-    snprintf(path, sizeof(path), "data/contacts/%s.pub", peer_name);
+    contact_pub_path(peer_name, path, sizeof(path));
 
     fp = fopen(path, "w");
     if (fp == NULL) {
@@ -232,6 +258,63 @@ static int save_contact_key(const char *peer_name, const char *identity_pub_b64)
     return P2P_OK;
 }
 
+static int load_contact_key(const char *peer_name, char *identity_pub_b64, size_t identity_pub_b64_size) {
+    char path[P2P_MAX_PATH_LEN];
+    FILE *fp = NULL;
+
+    if (peer_name == NULL || identity_pub_b64 == NULL || identity_pub_b64_size == 0) {
+        return P2P_ERR;
+    }
+
+    contact_pub_path(peer_name, path, sizeof(path));
+
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        return P2P_ERR;
+    }
+
+    if (fgets(identity_pub_b64, (int)identity_pub_b64_size, fp) == NULL) {
+        fclose(fp);
+        return P2P_ERR;
+    }
+
+    fclose(fp);
+    identity_pub_b64[strcspn(identity_pub_b64, "\r\n")] = '\0';
+    return P2P_OK;
+}
+
+static int mark_contact_verified(const char *peer_name) {
+    char path[P2P_MAX_PATH_LEN];
+    FILE *fp = NULL;
+
+    if (peer_name == NULL) {
+        return P2P_ERR;
+    }
+
+    contact_verified_path(peer_name, path, sizeof(path));
+
+    fp = fopen(path, "w");
+    if (fp == NULL) {
+        return P2P_ERR;
+    }
+
+    fprintf(fp, "verified\n");
+    fclose(fp);
+
+    return P2P_OK;
+}
+
+static int is_contact_verified(const char *peer_name) {
+    char path[P2P_MAX_PATH_LEN];
+
+    if (peer_name == NULL) {
+        return 0;
+    }
+
+    contact_verified_path(peer_name, path, sizeof(path));
+    return access(path, F_OK) == 0;
+}
+
 static int connect_to_peer(PeerDiscovery *discovery,
                            const char *peer_name,
                            PeerConnection *conn,
@@ -240,6 +323,7 @@ static int connect_to_peer(PeerDiscovery *discovery,
     PeerInfo peer_info;
     int fd;
     char remote_pub_b64[128];
+    char saved_pub_b64[128];
     char fingerprint[128];
 
     if (discovery == NULL || peer_name == NULL || conn == NULL || username == NULL || identity == NULL) {
@@ -275,15 +359,43 @@ static int connect_to_peer(PeerDiscovery *discovery,
     if (base64_encode(conn->remote_identity_pub,
                       P2P_ED25519_PUBKEY_BYTES,
                       remote_pub_b64,
-                      sizeof(remote_pub_b64)) == P2P_OK &&
-        !contact_exists(peer_name)) {
+                      sizeof(remote_pub_b64)) != P2P_OK) {
+        printf("failed to encode remote identity\n");
+        connection_cleanup(conn);
+        return P2P_ERR;
+    }
+
+    if (!contact_exists(peer_name)) {
+        if (save_contact_key(peer_name, remote_pub_b64) != P2P_OK) {
+            printf("failed to save peer identity\n");
+            connection_cleanup(conn);
+            return P2P_ERR;
+        }
+
         format_fingerprint_from_b64(remote_pub_b64, fingerprint, sizeof(fingerprint));
         printf("new peer: %s\n", peer_name);
         printf("fingerprint: %s\n", fingerprint);
         printf("verify it out of band with /verify %s\n", peer_name);
+    } else {
+        if (load_contact_key(peer_name, saved_pub_b64, sizeof(saved_pub_b64)) != P2P_OK) {
+            printf("failed to load saved identity for %s\n", peer_name);
+            connection_cleanup(conn);
+            return P2P_ERR;
+        }
+
+        if (strcmp(saved_pub_b64, remote_pub_b64) != 0) {
+            printf("warning: identity key mismatch for %s\n", peer_name);
+            printf("possible machine-in-the-middle attack\n");
+            connection_cleanup(conn);
+            return P2P_ERR;
+        }
     }
 
-    printf("secure session with %s\n", peer_name);
+    if (is_contact_verified(peer_name)) {
+        printf("secure session with %s (verified)\n", peer_name);
+    } else {
+        printf("secure session with %s\n", peer_name);
+    }
 
     return P2P_OK;
 }
@@ -465,67 +577,18 @@ static void cmd_get(PeerDiscovery *discovery,
     connection_cleanup(&conn);
 }
 
-static void cmd_verify(PeerDiscovery *discovery,
-                       const char *peer_name,
-                       const char *username,
-                       IdentityKeyPair *identity) {
-    PeerConnection conn;
-    cJSON *req = NULL;
-    cJSON *resp = NULL;
-    char msg_type[64];
-    const char *identity_pub = NULL;
+static void cmd_verify(const char *peer_name) {
+    char identity_pub[128];
     char fingerprint[128];
     char confirm[32];
 
-    if (connect_to_peer(discovery, peer_name, &conn, username, identity) != P2P_OK) {
+    if (peer_name == NULL) {
+        printf("usage: /verify <peer>\n");
         return;
     }
 
-    req = build_verify_request_payload();
-    if (req == NULL) {
-        printf("failed to build verify request\n");
-        connection_cleanup(&conn);
-        return;
-    }
-
-    if (connection_send_encrypted(&conn, MSG_VERIFY_REQUEST, req) != P2P_OK) {
-        printf("failed to send verify request\n");
-        cJSON_Delete(req);
-        connection_cleanup(&conn);
-        return;
-    }
-
-    cJSON_Delete(req);
-
-    resp = connection_recv_encrypted(&conn, msg_type, sizeof(msg_type));
-    if (resp == NULL) {
-        printf("failed to receive verify response\n");
-        connection_cleanup(&conn);
-        return;
-    }
-
-    if (strcmp(msg_type, MSG_VERIFY_RESPONSE) != 0) {
-        if (strcmp(msg_type, MSG_ERROR) == 0) {
-            const char *message = payload_get_string(resp, "message");
-            if (message != NULL) {
-                printf("error: %s\n", message);
-            } else {
-                printf("verify failed\n");
-            }
-        } else {
-            printf("unexpected response: %s\n", msg_type);
-        }
-
-        cJSON_Delete(resp);
-        connection_cleanup(&conn);
-        return;
-    }
-
-    identity_pub = payload_get_string(resp, "identity_pub");
-    if (identity_pub == NULL) {
-        printf("invalid verify response\n");
-        cJSON_Delete(resp);
-        connection_cleanup(&conn);
+    if (load_contact_key(peer_name, identity_pub, sizeof(identity_pub)) != P2P_OK) {
+        printf("no saved identity for %s\n", peer_name);
         return;
     }
 
@@ -535,29 +598,20 @@ static void cmd_verify(PeerDiscovery *discovery,
 
     if (fgets(confirm, sizeof(confirm), stdin) == NULL) {
         printf("verification cancelled\n");
-        cJSON_Delete(resp);
-        connection_cleanup(&conn);
         return;
     }
 
     if (confirm[0] != 'y' && confirm[0] != 'Y') {
         printf("verification cancelled\n");
-        cJSON_Delete(resp);
-        connection_cleanup(&conn);
         return;
     }
 
-    if (save_contact_key(peer_name, identity_pub) != P2P_OK) {
-        printf("failed to save identity\n");
-        cJSON_Delete(resp);
-        connection_cleanup(&conn);
+    if (mark_contact_verified(peer_name) != P2P_OK) {
+        printf("failed to mark %s as verified\n", peer_name);
         return;
     }
 
-    printf("saved verified key for %s\n", peer_name);
-
-    cJSON_Delete(resp);
-    connection_cleanup(&conn);
+    printf("marked %s as verified\n", peer_name);
 }
 
 static int sign_key_rotation(const IdentityKeyPair *old_identity,
@@ -838,7 +892,7 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            cmd_verify(&discovery, parts[1], username, &identity);
+            cmd_verify(parts[1]);
         } else if (strcmp(parts[0], "/rotate") == 0) {
             cmd_rotate(&discovery, &server, username, &identity);
         } else if (strcmp(parts[0], "/quit") == 0) {

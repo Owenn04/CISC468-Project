@@ -325,21 +325,21 @@ static int handle_file_request(PeerConnection *conn, cJSON *payload) {
     char ct_b64[8192];
 
     if (encrypt_bytes(conn->session_keys.send_key,
-                  data,
-                  len,
-                  nonce,
-                  ct,
-                  &ct_len) != P2P_OK) {
+                      data,
+                      len,
+                      nonce,
+                      ct,
+                      &ct_len) != P2P_OK) {
         goto cleanup;
     }
 
-if (base64_encode(nonce, sizeof(nonce), nonce_b64, sizeof(nonce_b64)) != P2P_OK) {
-    goto cleanup;
-}
+    if (base64_encode(nonce, sizeof(nonce), nonce_b64, sizeof(nonce_b64)) != P2P_OK) {
+        goto cleanup;
+    }
 
-if (base64_encode(ct, ct_len, ct_b64, sizeof(ct_b64)) != P2P_OK) {
-    goto cleanup;
-}
+    if (base64_encode(ct, ct_len, ct_b64, sizeof(ct_b64)) != P2P_OK) {
+        goto cleanup;
+    }
 
     if (sha256_hex(data, len, sha256_str) != P2P_OK) {
         goto cleanup;
@@ -379,28 +379,6 @@ cleanup:
     return result;
 }
 
-static int handle_verify_request(PeerConnection *conn) {
-    char identity_pub_b64[128];
-    cJSON *resp = NULL;
-    int result = P2P_ERR;
-
-    if (identity_pubkey_to_base64(&conn->local_identity,
-                                  identity_pub_b64,
-                                  sizeof(identity_pub_b64)) != P2P_OK) {
-        return P2P_ERR;
-    }
-
-    resp = build_verify_response_payload(identity_pub_b64);
-    if (resp == NULL) {
-        return P2P_ERR;
-    }
-
-    result = connection_send_encrypted(conn, MSG_VERIFY_RESPONSE, resp);
-    cJSON_Delete(resp);
-
-    return result;
-}
-
 static void connection_loop(PeerServer *server, PeerConnection *conn) {
     char type[64];
 
@@ -414,8 +392,6 @@ static void connection_loop(PeerServer *server, PeerConnection *conn) {
             handle_list_request(server, conn);
         } else if (strcmp(type, MSG_FILE_REQUEST) == 0) {
             handle_file_request(conn, payload);
-        } else if (strcmp(type, MSG_VERIFY_REQUEST) == 0) {
-            handle_verify_request(conn);
         } else if (strcmp(type, MSG_KEY_ROTATION) == 0) {
             handle_key_rotation(conn, payload);
         } else {

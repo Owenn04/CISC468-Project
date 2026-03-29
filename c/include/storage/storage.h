@@ -15,25 +15,25 @@ typedef struct {
     size_t size;
 } StoredFile;
 
-// list files
 int storage_list_shared_files(StoredFile *files, size_t max_files, size_t *out_count);
 
-// print helpers
 void storage_print_shared_files(void);
 void storage_print_received_files(void);
 
-// python-compatible json (CRITICAL)
 cJSON *storage_build_shared_files_json(const IdentityKeyPair *identity);
 
-// file lookup + copy
 int storage_find_shared_file(const char *filename, char *out_path, size_t out_path_size);
 int storage_add_shared_file(const char *src_path, char *out_name, size_t out_name_size);
 
-// received files
-int storage_save_received_file(const char *filename, const unsigned char *data, size_t data_len);
-int storage_export_received_file(const char *filename, const char *dest_path);
+int storage_save_received_file(const char *filename,
+                               const unsigned char *data,
+                               size_t data_len,
+                               const char *passphrase);
 
-// hashing + signing
+int storage_export_received_file(const char *filename,
+                                 const char *dest_path,
+                                 const char *passphrase);
+
 int storage_compute_sha256_hex(const unsigned char *data, size_t len, char out_hex[P2P_SHA256_HEX_LEN + 1]);
 
 int storage_sign_file_metadata(

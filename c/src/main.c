@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <termios.h>
 #include <unistd.h>
 
 static void print_help(void) {
@@ -29,6 +30,40 @@ static void print_help(void) {
     printf("  /verify <peer>            verify a peer identity key\n");
     printf("  /rotate                   rotate identity key\n");
     printf("  /quit                     exit the client\n");
+}
+
+static int read_hidden_input(const char *prompt, char *buf, size_t buf_size) {
+    struct termios oldt;
+    struct termios newt;
+
+    if (prompt == NULL || buf == NULL || buf_size == 0) {
+        return P2P_ERR;
+    }
+
+    printf("%s", prompt);
+    fflush(stdout);
+
+    if (tcgetattr(STDIN_FILENO, &oldt) != 0) {
+        return P2P_ERR;
+    }
+
+    newt = oldt;
+    newt.c_lflag &= ~(ECHO);
+
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &newt) != 0) {
+        return P2P_ERR;
+    }
+
+    if (fgets(buf, (int)buf_size, stdin) == NULL) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+        return P2P_ERR;
+    }
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    printf("\n");
+
+    buf[strcspn(buf, "\r\n")] = '\0';
+    return P2P_OK;
 }
 
 static int ensure_dir(const char *path) {
@@ -114,20 +149,22 @@ static void format_fingerprint_from_b64(const char *pub_b64, char *out, size_t o
     }
 }
 
-static int load_or_create_identity(const char *username, IdentityKeyPair *identity) {
+static int load_or_create_identity(const char *username,
+                                   const char *passphrase,
+                                   IdentityKeyPair *identity) {
     char pub_path[P2P_MAX_PATH_LEN];
     char priv_path[P2P_MAX_PATH_LEN];
     char pub_b64[128];
     char fingerprint[128];
 
-    if (username == NULL || identity == NULL) {
+    if (username == NULL || identity == NULL || passphrase == NULL) {
         return P2P_ERR;
     }
 
     snprintf(pub_path, sizeof(pub_path), "data/keys/%s.pub", username);
     snprintf(priv_path, sizeof(priv_path), "data/keys/%s.key", username);
 
-    if (load_identity_keypair(pub_path, priv_path, identity) == P2P_OK) {
+    if (load_identity_keypair(pub_path, priv_path, passphrase, identity) == P2P_OK) {
         if (identity_pubkey_to_base64(identity, pub_b64, sizeof(pub_b64)) == P2P_OK) {
             format_fingerprint_from_b64(pub_b64, fingerprint, sizeof(fingerprint));
             printf("loaded identity for %s\n", username);
@@ -140,7 +177,7 @@ static int load_or_create_identity(const char *username, IdentityKeyPair *identi
         return P2P_ERR;
     }
 
-    if (save_identity_keypair(pub_path, priv_path, identity) != P2P_OK) {
+    if (save_identity_keypair(pub_path, priv_path, identity, passphrase) != P2P_OK) {
         return P2P_ERR;
     }
 
@@ -482,7 +519,8 @@ static void cmd_get(PeerDiscovery *discovery,
                     const char *peer_name,
                     const char *filename,
                     const char *username,
-                    IdentityKeyPair *identity) {
+                    IdentityKeyPair *identity,
+                    const char *passphrase) {
     PeerConnection conn;
     cJSON *req = NULL;
     cJSON *resp = NULL;
@@ -562,7 +600,7 @@ static void cmd_get(PeerDiscovery *discovery,
         return;
     }
 
-    if (storage_save_received_file(recv_filename, data, data_len) != P2P_OK) {
+    if (storage_save_received_file(recv_filename, data, data_len, passphrase) != P2P_OK) {
         printf("failed to save received file\n");
         free(data);
         cJSON_Delete(resp);
@@ -677,7 +715,8 @@ static int copy_discovered_peers(PeerDiscovery *discovery, PeerInfo *out_peers, 
 static void cmd_rotate(PeerDiscovery *discovery,
                        PeerServer *server,
                        const char *username,
-                       IdentityKeyPair *identity) {
+                       IdentityKeyPair *identity,
+                       const char *passphrase) {
     IdentityKeyPair new_identity;
     PeerInfo peers[P2P_MAX_PEERS];
     char new_pub_b64[128];
@@ -689,7 +728,7 @@ static void cmd_rotate(PeerDiscovery *discovery,
     int notified = 0;
     int i;
 
-    if (discovery == NULL || server == NULL || username == NULL || identity == NULL) {
+    if (discovery == NULL || server == NULL || username == NULL || identity == NULL || passphrase == NULL) {
         printf("rotate failed\n");
         return;
     }
@@ -739,7 +778,7 @@ static void cmd_rotate(PeerDiscovery *discovery,
     snprintf(pub_path, sizeof(pub_path), "data/keys/%s.pub", username);
     snprintf(priv_path, sizeof(priv_path), "data/keys/%s.key", username);
 
-    if (save_identity_keypair(pub_path, priv_path, &new_identity) != P2P_OK) {
+    if (save_identity_keypair(pub_path, priv_path, &new_identity, passphrase) != P2P_OK) {
         printf("failed to save new identity\n");
         sodium_memzero(&new_identity, sizeof(new_identity));
         return;
@@ -761,6 +800,7 @@ int main(int argc, char *argv[]) {
     char input[1024];
     char *parts[4];
     int part_count;
+    char passphrase[256];
 
     const char *username;
     uint16_t port;
@@ -787,19 +827,29 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (load_or_create_identity(username, &identity) != P2P_OK) {
+    if (read_hidden_input("Passphrase (encrypts keys and stored files): ",
+                          passphrase,
+                          sizeof(passphrase)) != P2P_OK) {
+        fprintf(stderr, "failed to read passphrase\n");
+        return 1;
+    }
+
+    if (load_or_create_identity(username, passphrase, &identity) != P2P_OK) {
         fprintf(stderr, "failed to load or create identity\n");
+        sodium_memzero(passphrase, sizeof(passphrase));
         return 1;
     }
 
     server_init(&server, username, port);
     if (server_set_identity(&server, &identity) != P2P_OK) {
         fprintf(stderr, "failed to set server identity\n");
+        sodium_memzero(passphrase, sizeof(passphrase));
         return 1;
     }
 
     if (server_start(&server) != P2P_OK) {
         fprintf(stderr, "failed to start server\n");
+        sodium_memzero(passphrase, sizeof(passphrase));
         return 1;
     }
 
@@ -807,6 +857,7 @@ int main(int argc, char *argv[]) {
     if (discovery_start(&discovery) != P2P_OK) {
         fprintf(stderr, "failed to start discovery\n");
         server_stop(&server);
+        sodium_memzero(passphrase, sizeof(passphrase));
         return 1;
     }
 
@@ -850,7 +901,7 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            cmd_get(&discovery, parts[1], parts[2], username, &identity);
+            cmd_get(&discovery, parts[1], parts[2], username, &identity, passphrase);
         } else if (strcmp(parts[0], "/send") == 0) {
             if (part_count != 3) {
                 printf("usage: /send <peer> <file>\n");
@@ -868,7 +919,7 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            if (storage_export_received_file(parts[1], parts[2]) == P2P_OK) {
+            if (storage_export_received_file(parts[1], parts[2], passphrase) == P2P_OK) {
                 printf("exported: %s\n", parts[1]);
             } else {
                 printf("failed to export file\n");
@@ -894,7 +945,7 @@ int main(int argc, char *argv[]) {
 
             cmd_verify(parts[1]);
         } else if (strcmp(parts[0], "/rotate") == 0) {
-            cmd_rotate(&discovery, &server, username, &identity);
+            cmd_rotate(&discovery, &server, username, &identity, passphrase);
         } else if (strcmp(parts[0], "/quit") == 0) {
             break;
         } else {
@@ -905,6 +956,7 @@ int main(int argc, char *argv[]) {
 
     discovery_stop(&discovery);
     server_stop(&server);
+    sodium_memzero(passphrase, sizeof(passphrase));
 
     return 0;
 }

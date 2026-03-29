@@ -3,6 +3,7 @@
 #include <openssl/evp.h>
 #include <sodium.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int ensure_sodium_init(void) {
@@ -60,7 +61,60 @@ static int read_bytes_from_file(const char *path, unsigned char *data, size_t le
     return P2P_OK;
 }
 
-// hkdf-extract
+static int read_all_bytes_from_file(const char *path, unsigned char **data, size_t *len) {
+    FILE *fp;
+    unsigned char *buf;
+    long size;
+
+    if (path == NULL || data == NULL || len == NULL) {
+        return P2P_ERR;
+    }
+
+    *data = NULL;
+    *len = 0;
+
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return P2P_ERR;
+    }
+
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return P2P_ERR;
+    }
+
+    size = ftell(fp);
+    if (size < 0) {
+        fclose(fp);
+        return P2P_ERR;
+    }
+
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return P2P_ERR;
+    }
+
+    buf = (unsigned char *)malloc((size_t)size);
+    if (buf == NULL && size > 0) {
+        fclose(fp);
+        return P2P_ERR;
+    }
+
+    if (size > 0) {
+        if (fread(buf, 1, (size_t)size, fp) != (size_t)size) {
+            fclose(fp);
+            free(buf);
+            return P2P_ERR;
+        }
+    }
+
+    fclose(fp);
+
+    *data = buf;
+    *len = (size_t)size;
+    return P2P_OK;
+}
+
 static int hkdf_extract(const unsigned char *salt, size_t salt_len,
                         const unsigned char *ikm, size_t ikm_len,
                         unsigned char prk[crypto_auth_hmacsha256_BYTES]) {
@@ -87,7 +141,6 @@ static int hkdf_extract(const unsigned char *salt, size_t salt_len,
     return P2P_OK;
 }
 
-// hkdf-expand
 static int hkdf_expand(const unsigned char prk[crypto_auth_hmacsha256_BYTES],
                        const unsigned char *info, size_t info_len,
                        unsigned char *okm, size_t okm_len) {
@@ -159,8 +212,49 @@ int generate_identity_keypair(IdentityKeyPair *kp) {
     return P2P_OK;
 }
 
-int load_identity_keypair(const char *pub_path, const char *priv_path, IdentityKeyPair *kp) {
-    if (kp == NULL) {
+int derive_key_from_passphrase(const char *passphrase,
+                               unsigned char salt[P2P_PASSPHRASE_SALT_BYTES],
+                               unsigned char key[P2P_SESSION_KEY_BYTES],
+                               int generate_salt) {
+    if (passphrase == NULL || salt == NULL || key == NULL) {
+        return P2P_ERR;
+    }
+
+    if (ensure_sodium_init() != P2P_OK) {
+        return P2P_ERR;
+    }
+
+    if (generate_salt) {
+        randombytes_buf(salt, P2P_PASSPHRASE_SALT_BYTES);
+    }
+
+    if (crypto_pwhash(key,
+                      P2P_SESSION_KEY_BYTES,
+                      passphrase,
+                      strlen(passphrase),
+                      salt,
+                      crypto_pwhash_OPSLIMIT_MODERATE,
+                      crypto_pwhash_MEMLIMIT_MODERATE,
+                      crypto_pwhash_ALG_ARGON2ID13) != 0) {
+        return P2P_ERR;
+    }
+
+    return P2P_OK;
+}
+
+int load_identity_keypair(const char *pub_path,
+                          const char *priv_path,
+                          const char *passphrase,
+                          IdentityKeyPair *kp) {
+    unsigned char *enc = NULL;
+    size_t enc_len = 0;
+    unsigned char salt[P2P_PASSPHRASE_SALT_BYTES];
+    unsigned char key[P2P_SESSION_KEY_BYTES];
+    unsigned char nonce[P2P_NONCE_BYTES];
+    size_t ct_len;
+    size_t pt_len = 0;
+
+    if (kp == NULL || passphrase == NULL) {
         return P2P_ERR;
     }
 
@@ -168,15 +262,54 @@ int load_identity_keypair(const char *pub_path, const char *priv_path, IdentityK
         return P2P_ERR;
     }
 
-    if (read_bytes_from_file(priv_path, kp->priv, sizeof(kp->priv)) != P2P_OK) {
+    if (read_all_bytes_from_file(priv_path, &enc, &enc_len) != P2P_OK) {
         return P2P_ERR;
     }
 
-    return P2P_OK;
+    if (enc_len < P2P_PASSPHRASE_SALT_BYTES + P2P_NONCE_BYTES + P2P_GCM_TAG_BYTES) {
+        free(enc);
+        return P2P_ERR;
+    }
+
+    memcpy(salt, enc, P2P_PASSPHRASE_SALT_BYTES);
+    memcpy(nonce, enc + P2P_PASSPHRASE_SALT_BYTES, P2P_NONCE_BYTES);
+    ct_len = enc_len - P2P_PASSPHRASE_SALT_BYTES - P2P_NONCE_BYTES;
+
+    if (derive_key_from_passphrase(passphrase, salt, key, 0) != P2P_OK) {
+        free(enc);
+        return P2P_ERR;
+    }
+
+    if (decrypt_bytes(key,
+                      nonce,
+                      enc + P2P_PASSPHRASE_SALT_BYTES + P2P_NONCE_BYTES,
+                      ct_len,
+                      kp->priv,
+                      &pt_len) != P2P_OK) {
+        sodium_memzero(key, sizeof(key));
+        free(enc);
+        return P2P_ERR;
+    }
+
+    sodium_memzero(key, sizeof(key));
+    sodium_memzero(enc, enc_len);
+    free(enc);
+
+    return pt_len == sizeof(kp->priv) ? P2P_OK : P2P_ERR;
 }
 
-int save_identity_keypair(const char *pub_path, const char *priv_path, const IdentityKeyPair *kp) {
-    if (kp == NULL) {
+int save_identity_keypair(const char *pub_path,
+                          const char *priv_path,
+                          const IdentityKeyPair *kp,
+                          const char *passphrase) {
+    unsigned char salt[P2P_PASSPHRASE_SALT_BYTES];
+    unsigned char key[P2P_SESSION_KEY_BYTES];
+    unsigned char nonce[P2P_NONCE_BYTES];
+    unsigned char ciphertext[P2P_ED25519_PRIVKEY_BYTES + P2P_GCM_TAG_BYTES];
+    size_t ct_len = 0;
+    unsigned char file_buf[P2P_PASSPHRASE_SALT_BYTES + P2P_NONCE_BYTES + P2P_ED25519_PRIVKEY_BYTES + P2P_GCM_TAG_BYTES];
+
+    if (kp == NULL || passphrase == NULL) {
         return P2P_ERR;
     }
 
@@ -184,7 +317,29 @@ int save_identity_keypair(const char *pub_path, const char *priv_path, const Ide
         return P2P_ERR;
     }
 
-    if (write_bytes_to_file(priv_path, kp->priv, sizeof(kp->priv)) != P2P_OK) {
+    if (derive_key_from_passphrase(passphrase, salt, key, 1) != P2P_OK) {
+        return P2P_ERR;
+    }
+
+    if (encrypt_bytes(key,
+                      kp->priv,
+                      sizeof(kp->priv),
+                      nonce,
+                      ciphertext,
+                      &ct_len) != P2P_OK) {
+        sodium_memzero(key, sizeof(key));
+        return P2P_ERR;
+    }
+
+    memcpy(file_buf, salt, P2P_PASSPHRASE_SALT_BYTES);
+    memcpy(file_buf + P2P_PASSPHRASE_SALT_BYTES, nonce, P2P_NONCE_BYTES);
+    memcpy(file_buf + P2P_PASSPHRASE_SALT_BYTES + P2P_NONCE_BYTES, ciphertext, ct_len);
+
+    sodium_memzero(key, sizeof(key));
+
+    if (write_bytes_to_file(priv_path,
+                            file_buf,
+                            P2P_PASSPHRASE_SALT_BYTES + P2P_NONCE_BYTES + ct_len) != P2P_OK) {
         return P2P_ERR;
     }
 
@@ -254,7 +409,6 @@ int derive_session_key(const unsigned char *shared_secret,
     return P2P_OK;
 }
 
-// encrypt using aes-gcm
 int encrypt_bytes(const unsigned char key[P2P_SESSION_KEY_BYTES],
                   const unsigned char *plaintext,
                   size_t plaintext_len,
@@ -264,7 +418,7 @@ int encrypt_bytes(const unsigned char key[P2P_SESSION_KEY_BYTES],
     EVP_CIPHER_CTX *ctx = NULL;
     int len = 0;
     int total_len = 0;
-    unsigned char tag[16];
+    unsigned char tag[P2P_GCM_TAG_BYTES];
 
     if (ensure_sodium_init() != P2P_OK) {
         return P2P_ERR;
@@ -324,7 +478,6 @@ int encrypt_bytes(const unsigned char key[P2P_SESSION_KEY_BYTES],
     return P2P_OK;
 }
 
-// decrypt aes-gcm
 int decrypt_bytes(const unsigned char key[P2P_SESSION_KEY_BYTES],
                   const unsigned char nonce[P2P_NONCE_BYTES],
                   const unsigned char *ciphertext,
@@ -341,11 +494,11 @@ int decrypt_bytes(const unsigned char key[P2P_SESSION_KEY_BYTES],
         return P2P_ERR;
     }
 
-    if (ciphertext_len < 16) {
+    if (ciphertext_len < P2P_GCM_TAG_BYTES) {
         return P2P_ERR;
     }
 
-    data_len = ciphertext_len - 16;
+    data_len = ciphertext_len - P2P_GCM_TAG_BYTES;
     tag = ciphertext + data_len;
 
     ctx = EVP_CIPHER_CTX_new();
@@ -376,7 +529,7 @@ int decrypt_bytes(const unsigned char key[P2P_SESSION_KEY_BYTES],
         total_len += len;
     }
 
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, (void *)tag) != 1) {
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, P2P_GCM_TAG_BYTES, (void *)tag) != 1) {
         EVP_CIPHER_CTX_free(ctx);
         return P2P_ERR;
     }

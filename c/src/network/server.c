@@ -317,41 +317,42 @@ static int handle_file_request(PeerConnection *conn, cJSON *payload) {
         return P2P_ERR;
     }
 
-    unsigned char nonce[P2P_NONCE_BYTES];
-    unsigned char ct[8192];
-    size_t ct_len = 0;
+    {
+        unsigned char nonce[P2P_NONCE_BYTES];
+        unsigned char ct[8192];
+        size_t ct_len = 0;
+        char nonce_b64[64];
+        char ct_b64[8192];
 
-    char nonce_b64[64];
-    char ct_b64[8192];
+        if (encrypt_bytes(conn->session_keys.send_key,
+                          data,
+                          len,
+                          nonce,
+                          ct,
+                          &ct_len) != P2P_OK) {
+            goto cleanup;
+        }
 
-    if (encrypt_bytes(conn->session_keys.send_key,
-                      data,
-                      len,
-                      nonce,
-                      ct,
-                      &ct_len) != P2P_OK) {
-        goto cleanup;
-    }
+        if (base64_encode(nonce, sizeof(nonce), nonce_b64, sizeof(nonce_b64)) != P2P_OK) {
+            goto cleanup;
+        }
 
-    if (base64_encode(nonce, sizeof(nonce), nonce_b64, sizeof(nonce_b64)) != P2P_OK) {
-        goto cleanup;
-    }
+        if (base64_encode(ct, ct_len, ct_b64, sizeof(ct_b64)) != P2P_OK) {
+            goto cleanup;
+        }
 
-    if (base64_encode(ct, ct_len, ct_b64, sizeof(ct_b64)) != P2P_OK) {
-        goto cleanup;
-    }
+        if (sha256_hex(data, len, sha256_str) != P2P_OK) {
+            goto cleanup;
+        }
 
-    if (sha256_hex(data, len, sha256_str) != P2P_OK) {
-        goto cleanup;
-    }
+        if (sign_file_metadata(&conn->local_identity, filename, sha256_str, sig_b64, sizeof(sig_b64)) != P2P_OK) {
+            goto cleanup;
+        }
 
-    if (sign_file_metadata(&conn->local_identity, filename, sha256_str, sig_b64, sizeof(sig_b64)) != P2P_OK) {
-        goto cleanup;
-    }
-
-    resp = build_file_transfer_payload(filename, nonce_b64, ct_b64, sha256_str, sig_b64);
-    if (resp == NULL) {
-        goto cleanup;
+        resp = build_file_transfer_payload(filename, nonce_b64, ct_b64, sha256_str, sig_b64);
+        if (resp == NULL) {
+            goto cleanup;
+        }
     }
 
     result = connection_send_encrypted(conn, MSG_FILE_TRANSFER, resp);
@@ -523,6 +524,7 @@ void server_stop(PeerServer *server) {
 
     if (!server->running) {
         if (server->listen_fd >= 0) {
+            shutdown(server->listen_fd, SHUT_RDWR);
             close(server->listen_fd);
             server->listen_fd = -1;
         }
@@ -532,6 +534,7 @@ void server_stop(PeerServer *server) {
     server->running = false;
 
     if (server->listen_fd >= 0) {
+        shutdown(server->listen_fd, SHUT_RDWR);
         close(server->listen_fd);
         server->listen_fd = -1;
     }

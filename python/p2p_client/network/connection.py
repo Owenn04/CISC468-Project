@@ -69,7 +69,7 @@ class Connection:
         self._peer_name:  str | None = None
         self._peer_pub    = None  # Ed25519PublicKey
 
-    # -- Handshake ----------------------------------------------------------
+    # Handshake 
 
     def handshake(self) -> bool:
         """
@@ -145,7 +145,7 @@ class Connection:
                  key_exchange_payload(self._session.public_b64()))
         print(f"[conn] Session key derived with {self._peer_name} (PFS active)")
 
-    # -- Encrypted send/recv ------------------------------------------------
+    # Encrypted send/recv 
 
     def _send_encrypted(self, msg_type: str, payload: dict):
         encrypted = self._session.encrypt(json.dumps(payload).encode())
@@ -158,7 +158,7 @@ class Connection:
         payload = json.loads(raw.decode())
         return msg["type"], payload
 
-    # -- Application layer --------------------------------------------------
+    # Application layer 
 
     def request_file_list(self) -> list[dict] | None:
         """Ask peer for their file listing."""
@@ -252,7 +252,7 @@ class Connection:
         print(f"[recv] Received and stored '{filename}' (encrypted on disk)")
         return True
 
-    # -- Handlers (responder side) ------------------------------------------
+    #Handlers (responder side) 
 
     def handle_incoming(self):
         """

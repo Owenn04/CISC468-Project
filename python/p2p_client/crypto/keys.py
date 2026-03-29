@@ -23,20 +23,13 @@ from cryptography.exceptions import InvalidSignature
 import argon2.low_level as argon2ll
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
+# Helpers
 def _b64e(b: bytes) -> str:
     return base64.b64encode(b).decode()
 
 def _b64d(s: str) -> bytes:
     return base64.b64decode(s)
-
-
-# ---------------------------------------------------------------------------
-# Identity key (Ed25519)
-# ---------------------------------------------------------------------------
 
 class IdentityKey:
     """Long-term Ed25519 signing key for a peer."""
@@ -44,8 +37,6 @@ class IdentityKey:
     def __init__(self, private_key: Ed25519PrivateKey):
         self._priv = private_key
         self._pub  = private_key.public_key()
-
-    # -- Constructors -------------------------------------------------------
 
     @classmethod
     def generate(cls) -> "IdentityKey":
@@ -58,8 +49,6 @@ class IdentityKey:
         priv = serialization.load_pem_private_key(pem, password=passphrase)
         return cls(priv)
 
-    # -- Persistence --------------------------------------------------------
-
     def save(self, path: Path, passphrase: bytes) -> None:
         """Encrypt and save private key to disk as PEM."""
         pem = self._priv.private_bytes(
@@ -69,7 +58,7 @@ class IdentityKey:
         )
         path.write_bytes(pem)
 
-    # -- Public key export --------------------------------------------------
+    # Public key export
 
     def public_bytes(self) -> bytes:
         return self._pub.public_bytes(
@@ -84,7 +73,7 @@ class IdentityKey:
         raw = _b64d(s)
         return Ed25519PublicKey.from_public_bytes(raw)
 
-    # -- Sign / verify ------------------------------------------------------
+    # Sign / verify
 
     def sign(self, data: bytes) -> bytes:
         return self._priv.sign(data)
@@ -98,9 +87,7 @@ class IdentityKey:
             return False
 
 
-# ---------------------------------------------------------------------------
 # Session key exchange (X25519 ECDH → HKDF → AES-256-GCM)
-# ---------------------------------------------------------------------------
 
 class SessionKey:
     """
@@ -154,7 +141,7 @@ class SessionKey:
         self._send_aes = AESGCM(send_key)
         self._recv_aes = AESGCM(recv_key)
 
-    # -- Encrypt / decrypt --------------------------------------------------
+    # Encrypt / decrypt 
 
     def encrypt(self, plaintext: bytes) -> dict:
         """Returns {"nonce": b64, "ct": b64}"""
@@ -172,9 +159,8 @@ class SessionKey:
         return self._recv_aes.decrypt(nonce, ct, None)
 
 
-# ---------------------------------------------------------------------------
 # File encryption (local storage — Argon2id + AES-256-GCM)
-# ---------------------------------------------------------------------------
+
 
 def derive_storage_key(passphrase: str, salt: bytes) -> bytes:
     """Derive a 256-bit key from a passphrase using Argon2id."""

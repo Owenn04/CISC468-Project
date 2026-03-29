@@ -56,7 +56,7 @@ class Discovery:
             self._zeroconf.unregister_service(self._info)
         self._zeroconf.close()
 
-    # -- Peer list ----------------------------------------------------------
+    # Peer list 
 
     def peers(self) -> list[PeerInfo]:
         with self._lock:
@@ -67,9 +67,7 @@ class Discovery:
             return self._peers.get(username)
 
 
-# ---------------------------------------------------------------------------
 # Internal zeroconf listener
-# ---------------------------------------------------------------------------
 
 class _PeerListener:
 
@@ -101,9 +99,8 @@ class _PeerListener:
         self.add_service(zc, type_, name)
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
+
 
 def _local_ip() -> str:
     """Best-effort local IP (not 127.0.0.1)."""

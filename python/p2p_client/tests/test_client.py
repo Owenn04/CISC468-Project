@@ -36,10 +36,7 @@ from p2p_client.network.connection import Connection
 from p2p_client.network.server     import Server
 from p2p_client.storage.store      import Storage
 
-
-# ---------------------------------------------------------------------------
 # Fixtures
-# ---------------------------------------------------------------------------
 
 PASSPHRASE = "test-passphrase-123"
 
@@ -109,9 +106,7 @@ def _handshake_pair(conn_a, conn_b):
     return results[0], results[1]
 
 
-# ---------------------------------------------------------------------------
 # Req 9: Local encrypted storage (AES-256-GCM + Argon2id)
-# ---------------------------------------------------------------------------
 
 class TestLocalStorage:
 
@@ -154,9 +149,7 @@ class TestLocalStorage:
         assert dest.read_bytes() == data
 
 
-# ---------------------------------------------------------------------------
 # Req 7: File integrity — SHA-256 + Ed25519 signature
-# ---------------------------------------------------------------------------
 
 class TestIntegrity:
 
@@ -198,9 +191,7 @@ class TestIntegrity:
             assert verify_file_meta(pub, e["filename"], e["sha256"], e["sig"])
 
 
-# ---------------------------------------------------------------------------
 # Req 8: Perfect forward secrecy — new ephemeral keys per session
-# ---------------------------------------------------------------------------
 
 class TestPFS:
 
@@ -239,9 +230,7 @@ class TestPFS:
             session.encrypt(b"data")
 
 
-# ---------------------------------------------------------------------------
 # Req 2: Mutual authentication — TOFU + key mismatch rejection
-# ---------------------------------------------------------------------------
 
 class TestAuthentication:
 
@@ -283,9 +272,7 @@ class TestAuthentication:
         conn_a.close(); conn_b.close()
 
 
-# ---------------------------------------------------------------------------
 # Req 6: Key rotation
-# ---------------------------------------------------------------------------
 
 class TestKeyRotation:
 
@@ -328,9 +315,7 @@ class TestKeyRotation:
         assert stored.public_bytes_raw() == old_key.public_bytes()
 
 
-# ---------------------------------------------------------------------------
 # Req 5: Offline peer fallback — signature verifies original owner
-# ---------------------------------------------------------------------------
 
 class TestOfflineFallback:
 
@@ -362,9 +347,7 @@ class TestOfflineFallback:
         assert not verify_file_meta(pub_a, "file.txt", sha_tampered, sig)
 
 
-# ---------------------------------------------------------------------------
 # Req 4 + 3: File listing and transfer over real sockets (integration)
-# ---------------------------------------------------------------------------
 
 class TestIntegration:
 
@@ -465,9 +448,7 @@ class TestIntegration:
         assert not success[0]
 
 
-# ---------------------------------------------------------------------------
 # Protocol framing
-# ---------------------------------------------------------------------------
 
 class TestProtocolFraming:
 

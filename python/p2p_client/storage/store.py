@@ -19,7 +19,7 @@ class Storage:
         shared_dir.mkdir(parents=True, exist_ok=True)
         recv_dir.mkdir(parents=True, exist_ok=True)
 
-    # -- Received files (encrypted on disk) ---------------------------------
+    #Received files (encrypted on disk)
 
     def list_received(self) -> list[str]:
         """Return filenames of decryptable received files (strips .enc suffix)."""
@@ -38,7 +38,7 @@ class Storage:
         dest.write_bytes(data)
         print(f"[storage] Exported '{filename}' to {dest}")
 
-    # -- Shared files (plaintext, readable by peers) ------------------------
+    #  Shared files (plaintext, readable by peers)
 
     def list_shared(self) -> list[str]:
         return [f.name for f in self._shared.iterdir() if f.is_file()]

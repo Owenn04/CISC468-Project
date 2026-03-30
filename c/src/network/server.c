@@ -139,6 +139,38 @@ static int sign_file_metadata(const IdentityKeyPair *identity,
     return P2P_OK;
 }
 
+static int verify_file_metadata_signature(const unsigned char remote_identity_pub[P2P_ED25519_PUBKEY_BYTES],
+                                          const char *filename,
+                                          const char *sha256_str,
+                                          const char *sig_b64) {
+    unsigned char sig[crypto_sign_BYTES];
+    size_t sig_len = 0;
+    char meta[1024];
+    int written;
+
+    if (remote_identity_pub == NULL || filename == NULL || sha256_str == NULL || sig_b64 == NULL) {
+        return P2P_ERR;
+    }
+
+    if (base64_decode(sig_b64, sig, sizeof(sig), &sig_len) != P2P_OK || sig_len != sizeof(sig)) {
+        return P2P_ERR;
+    }
+
+    written = snprintf(meta, sizeof(meta), "%s|%s", filename, sha256_str);
+    if (written < 0 || (size_t)written >= sizeof(meta)) {
+        return P2P_ERR;
+    }
+
+    if (crypto_sign_verify_detached(sig,
+                                    (const unsigned char *)meta,
+                                    (unsigned long long)strlen(meta),
+                                    remote_identity_pub) != 0) {
+        return P2P_ERR;
+    }
+
+    return P2P_OK;
+}
+
 static int handle_key_rotation(PeerConnection *conn, cJSON *payload) {
     const char *new_pub;
     const char *sig_b64;
@@ -281,8 +313,6 @@ static int handle_file_request(PeerConnection *conn, cJSON *payload) {
     char full_path[P2P_MAX_PATH_LEN];
     unsigned char *data = NULL;
     size_t len = 0;
-    size_t b64_size;
-    char *content_b64 = NULL;
     char sha256_str[P2P_SHA256_HEX_LEN + 1];
     char sig_b64[128];
     cJSON *resp = NULL;
@@ -369,15 +399,78 @@ cleanup:
     if (resp != NULL) {
         cJSON_Delete(resp);
     }
-    if (content_b64 != NULL) {
-        free(content_b64);
-    }
     if (data != NULL) {
         sodium_memzero(data, len);
         free(data);
     }
 
     return result;
+}
+
+static int handle_incoming_file_transfer(PeerServer *server, PeerConnection *conn, cJSON *payload) {
+    const char *filename;
+    const char *nonce_b64;
+    const char *ct_b64;
+    const char *sha256_str;
+    const char *sig_b64;
+    unsigned char nonce[P2P_NONCE_BYTES];
+    unsigned char ct[8192];
+    unsigned char plaintext[8192];
+    size_t nonce_len = 0;
+    size_t ct_len = 0;
+    size_t pt_len = 0;
+    char computed_sha256[P2P_SHA256_HEX_LEN + 1];
+
+    filename = payload_get_string(payload, "filename");
+    nonce_b64 = payload_get_string(payload, "nonce");
+    ct_b64 = payload_get_string(payload, "ct");
+    sha256_str = payload_get_string(payload, "sha256");
+    sig_b64 = payload_get_string(payload, "sig");
+
+    if (filename == NULL || nonce_b64 == NULL || ct_b64 == NULL || sha256_str == NULL || sig_b64 == NULL) {
+        return P2P_ERR;
+    }
+
+    if (base64_decode(nonce_b64, nonce, sizeof(nonce), &nonce_len) != P2P_OK ||
+        nonce_len != sizeof(nonce)) {
+        return P2P_ERR;
+    }
+
+    if (base64_decode(ct_b64, ct, sizeof(ct), &ct_len) != P2P_OK) {
+        return P2P_ERR;
+    }
+
+    if (decrypt_bytes(conn->session_keys.recv_key,
+                      nonce,
+                      ct,
+                      ct_len,
+                      plaintext,
+                      &pt_len) != P2P_OK) {
+        return P2P_ERR;
+    }
+
+    if (sha256_hex(plaintext, pt_len, computed_sha256) != P2P_OK) {
+        return P2P_ERR;
+    }
+
+    if (strcmp(computed_sha256, sha256_str) != 0) {
+        return P2P_ERR;
+    }
+
+    if (verify_file_metadata_signature(conn->remote_identity_pub, filename, sha256_str, sig_b64) != P2P_OK) {
+        return P2P_ERR;
+    }
+
+    if (server == NULL || server->storage_passphrase[0] == '\0') {
+        return P2P_ERR;
+    }
+
+    if (storage_save_received_file(filename, plaintext, pt_len, server->storage_passphrase) != P2P_OK) {
+        return P2P_ERR;
+    }
+
+    printf("saved file: %s\n", filename);
+    return P2P_OK;
 }
 
 static void connection_loop(PeerServer *server, PeerConnection *conn) {
@@ -393,6 +486,14 @@ static void connection_loop(PeerServer *server, PeerConnection *conn) {
             handle_list_request(server, conn);
         } else if (strcmp(type, MSG_FILE_REQUEST) == 0) {
             handle_file_request(conn, payload);
+        } else if (strcmp(type, MSG_FILE_TRANSFER) == 0) {
+            if (handle_incoming_file_transfer(server, conn, payload) != P2P_OK) {
+                cJSON *err = build_error_payload("invalid file transfer");
+                if (err != NULL) {
+                    connection_send_encrypted(conn, MSG_ERROR, err);
+                    cJSON_Delete(err);
+                }
+            }
         } else if (strcmp(type, MSG_KEY_ROTATION) == 0) {
             handle_key_rotation(conn, payload);
         } else {
@@ -473,6 +574,16 @@ int server_set_identity(PeerServer *server, const IdentityKeyPair *identity) {
     return P2P_OK;
 }
 
+int server_set_passphrase(PeerServer *server, const char *passphrase) {
+    if (server == NULL || passphrase == NULL) {
+        return P2P_ERR;
+    }
+
+    strncpy(server->storage_passphrase, passphrase, sizeof(server->storage_passphrase) - 1);
+    server->storage_passphrase[sizeof(server->storage_passphrase) - 1] = '\0';
+    return P2P_OK;
+}
+
 int server_init_storage(PeerServer *server) {
     (void)server;
 
@@ -540,4 +651,5 @@ void server_stop(PeerServer *server) {
     }
 
     pthread_join(server->thread, NULL);
+    sodium_memzero(server->storage_passphrase, sizeof(server->storage_passphrase));
 }

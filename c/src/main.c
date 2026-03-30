@@ -237,6 +237,55 @@ static int split_command(char *line, char **parts, int max_parts) {
     return count;
 }
 
+static int read_file_bytes_local(const char *path, unsigned char **out, size_t *len) {
+    FILE *fp = NULL;
+    unsigned char *buf = NULL;
+    long size;
+
+    if (path == NULL || out == NULL || len == NULL) {
+        return P2P_ERR;
+    }
+
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return P2P_ERR;
+    }
+
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return P2P_ERR;
+    }
+
+    size = ftell(fp);
+    if (size < 0) {
+        fclose(fp);
+        return P2P_ERR;
+    }
+
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return P2P_ERR;
+    }
+
+    buf = (unsigned char *)malloc((size_t)size);
+    if (buf == NULL && size > 0) {
+        fclose(fp);
+        return P2P_ERR;
+    }
+
+    if (size > 0 && fread(buf, 1, (size_t)size, fp) != (size_t)size) {
+        fclose(fp);
+        free(buf);
+        return P2P_ERR;
+    }
+
+    fclose(fp);
+
+    *out = buf;
+    *len = (size_t)size;
+    return P2P_OK;
+}
+
 static void contact_pub_path(const char *peer_name, char *path, size_t path_size) {
     if (path == NULL || path_size == 0) {
         return;
@@ -526,9 +575,20 @@ static void cmd_get(PeerDiscovery *discovery,
     cJSON *resp = NULL;
     char msg_type[64];
     const char *recv_filename;
-    const char *content_b64;
-    unsigned char *data = NULL;
-    size_t data_len = 0;
+    const char *nonce_b64;
+    const char *ct_b64;
+    const char *sha256_hex;
+    const char *sig_b64;
+    unsigned char nonce[P2P_NONCE_BYTES];
+    unsigned char *ct = NULL;
+    unsigned char *pt = NULL;
+    size_t nonce_len = 0;
+    size_t ct_len = 0;
+    size_t pt_len = 0;
+    size_t ct_buf_len;
+    char computed_sha256[P2P_SHA256_HEX_LEN + 1];
+
+    (void)sig_b64;
 
     if (connect_to_peer(discovery, peer_name, &conn, username, identity) != P2P_OK) {
         return;
@@ -575,34 +635,81 @@ static void cmd_get(PeerDiscovery *discovery,
     }
 
     recv_filename = payload_get_string(resp, "filename");
-    content_b64 = payload_get_string(resp, "content");
+    nonce_b64 = payload_get_string(resp, "nonce");
+    ct_b64 = payload_get_string(resp, "ct");
+    sha256_hex = payload_get_string(resp, "sha256");
+    sig_b64 = payload_get_string(resp, "sig");
 
-    if (recv_filename == NULL || content_b64 == NULL) {
+    if (recv_filename == NULL || nonce_b64 == NULL || ct_b64 == NULL ||
+        sha256_hex == NULL || sig_b64 == NULL) {
         printf("invalid file transfer response\n");
         cJSON_Delete(resp);
         connection_cleanup(&conn);
         return;
     }
 
-    data = (unsigned char *)malloc(strlen(content_b64));
-    if (data == NULL) {
+    if (base64_decode(nonce_b64, nonce, sizeof(nonce), &nonce_len) != P2P_OK ||
+        nonce_len != P2P_NONCE_BYTES) {
+        printf("invalid nonce\n");
+        cJSON_Delete(resp);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    ct_buf_len = strlen(ct_b64);
+    ct = (unsigned char *)malloc(ct_buf_len);
+    if (ct == NULL && ct_buf_len > 0) {
         printf("out of memory\n");
         cJSON_Delete(resp);
         connection_cleanup(&conn);
         return;
     }
 
-    if (base64_decode(content_b64, data, strlen(content_b64), &data_len) != P2P_OK) {
-        printf("failed to decode file\n");
-        free(data);
+    if (base64_decode(ct_b64, ct, ct_buf_len, &ct_len) != P2P_OK) {
+        printf("invalid ciphertext\n");
+        free(ct);
         cJSON_Delete(resp);
         connection_cleanup(&conn);
         return;
     }
 
-    if (storage_save_received_file(recv_filename, data, data_len, passphrase) != P2P_OK) {
+    pt = (unsigned char *)malloc(ct_len);
+    if (pt == NULL && ct_len > 0) {
+        printf("out of memory\n");
+        free(ct);
+        cJSON_Delete(resp);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    if (decrypt_bytes(conn.session_keys.recv_key,
+                      nonce,
+                      ct,
+                      ct_len,
+                      pt,
+                      &pt_len) != P2P_OK) {
+        printf("decryption failed\n");
+        free(pt);
+        free(ct);
+        cJSON_Delete(resp);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    if (storage_compute_sha256_hex(pt, pt_len, computed_sha256) != P2P_OK ||
+        strcmp(computed_sha256, sha256_hex) != 0) {
+        printf("sha256 mismatch\n");
+        free(pt);
+        free(ct);
+        cJSON_Delete(resp);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    if (storage_save_received_file(recv_filename, pt, pt_len, passphrase) != P2P_OK) {
         printf("failed to save received file\n");
-        free(data);
+        free(pt);
+        free(ct);
         cJSON_Delete(resp);
         connection_cleanup(&conn);
         return;
@@ -610,8 +717,135 @@ static void cmd_get(PeerDiscovery *discovery,
 
     printf("saved file: %s\n", recv_filename);
 
-    free(data);
+    free(pt);
+    free(ct);
     cJSON_Delete(resp);
+    connection_cleanup(&conn);
+}
+
+static void cmd_send(PeerDiscovery *discovery,
+                     const char *peer_name,
+                     const char *filename,
+                     const char *username,
+                     IdentityKeyPair *identity) {
+    PeerConnection conn;
+    char path[P2P_MAX_PATH_LEN];
+    unsigned char *data = NULL;
+    size_t data_len = 0;
+    char sha256[P2P_SHA256_HEX_LEN + 1];
+    char sig_b64[256];
+    unsigned char nonce[P2P_NONCE_BYTES];
+    unsigned char *ct = NULL;
+    size_t ct_len = 0;
+    char nonce_b64[64];
+    char *ct_b64 = NULL;
+    size_t ct_b64_size;
+    cJSON *payload = NULL;
+
+    if (connect_to_peer(discovery, peer_name, &conn, username, identity) != P2P_OK) {
+        return;
+    }
+
+    if (storage_find_shared_file(filename, path, sizeof(path)) != P2P_OK) {
+        printf("shared file not found: %s\n", filename);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    if (read_file_bytes_local(path, &data, &data_len) != P2P_OK) {
+        printf("failed to read file\n");
+        connection_cleanup(&conn);
+        return;
+    }
+
+    if (storage_compute_sha256_hex(data, data_len, sha256) != P2P_OK) {
+        printf("failed to hash file\n");
+        free(data);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    if (storage_sign_file_metadata(identity, filename, sha256, sig_b64, sizeof(sig_b64)) != P2P_OK) {
+        printf("failed to sign file metadata\n");
+        free(data);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    ct = (unsigned char *)malloc(data_len + P2P_GCM_TAG_BYTES);
+    if (ct == NULL && (data_len + P2P_GCM_TAG_BYTES) > 0) {
+        printf("out of memory\n");
+        free(data);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    if (encrypt_bytes(conn.session_keys.send_key,
+                      data,
+                      data_len,
+                      nonce,
+                      ct,
+                      &ct_len) != P2P_OK) {
+        printf("failed to encrypt file\n");
+        free(ct);
+        free(data);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    if (base64_encode(nonce, sizeof(nonce), nonce_b64, sizeof(nonce_b64)) != P2P_OK) {
+        printf("failed to encode nonce\n");
+        free(ct);
+        free(data);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    ct_b64_size = ((ct_len + 2) / 3) * 4 + 4;
+    ct_b64 = (char *)malloc(ct_b64_size);
+    if (ct_b64 == NULL) {
+        printf("out of memory\n");
+        free(ct);
+        free(data);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    if (base64_encode(ct, ct_len, ct_b64, ct_b64_size) != P2P_OK) {
+        printf("failed to encode ciphertext\n");
+        free(ct_b64);
+        free(ct);
+        free(data);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    payload = build_file_transfer_payload(filename, nonce_b64, ct_b64, sha256, sig_b64);
+    if (payload == NULL) {
+        printf("failed to build file transfer payload\n");
+        free(ct_b64);
+        free(ct);
+        free(data);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    if (connection_send_encrypted(&conn, MSG_FILE_TRANSFER, payload) != P2P_OK) {
+        printf("failed to send file\n");
+        cJSON_Delete(payload);
+        free(ct_b64);
+        free(ct);
+        free(data);
+        connection_cleanup(&conn);
+        return;
+    }
+
+    printf("sent file: %s\n", filename);
+
+    cJSON_Delete(payload);
+    free(ct_b64);
+    free(ct);
+    free(data);
     connection_cleanup(&conn);
 }
 
@@ -847,6 +1081,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    if (server_set_passphrase(&server, passphrase) != P2P_OK) {
+        fprintf(stderr, "failed to set server passphrase\n");
+        sodium_memzero(passphrase, sizeof(passphrase));
+        return 1;
+    }
+
     if (server_start(&server) != P2P_OK) {
         fprintf(stderr, "failed to start server\n");
         sodium_memzero(passphrase, sizeof(passphrase));
@@ -908,7 +1148,7 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            printf("/send not implemented yet for peer %s file %s\n", parts[1], parts[2]);
+            cmd_send(&discovery, parts[1], parts[2], username, &identity);
         } else if (strcmp(parts[0], "/shared") == 0) {
             storage_print_shared_files();
         } else if (strcmp(parts[0], "/received") == 0) {

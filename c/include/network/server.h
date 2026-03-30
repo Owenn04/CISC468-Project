@@ -16,6 +16,7 @@ typedef struct {
 
     char local_username[P2P_MAX_USERNAME_LEN];
     IdentityKeyPair local_identity;
+    char storage_passphrase[256];
 
     pthread_t thread;
 } PeerServer;
@@ -25,6 +26,9 @@ void server_init(PeerServer *server, const char *local_username, uint16_t port);
 
 // set local identity used for handshakes
 int server_set_identity(PeerServer *server, const IdentityKeyPair *identity);
+
+// set passphrase used to encrypt received files at rest
+int server_set_passphrase(PeerServer *server, const char *passphrase);
 
 // ensure storage directories exist
 int server_init_storage(PeerServer *server);

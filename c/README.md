@@ -38,7 +38,7 @@ You need the following libraries installed before building:
 
 ### Compiler
 
-- `gcc` (GCC 9 or later recommended)
+- `gcc`
 
 ---
 
@@ -79,7 +79,7 @@ sudo apt install -y gcc libsodium-dev libssl-dev libcjson-dev \
   libavahi-client-dev libavahi-common-dev
 ```
 
-**4. Install and start the Avahi daemon (required for mDNS discovery)**
+**4. Install and start the Avahi daemon**
 
 ```bash
 sudo apt install -y avahi-daemon avahi-utils
@@ -87,18 +87,7 @@ sudo service dbus start
 sudo service avahi-daemon start
 ```
 
-> **Note:** On WSL, you may need to start these services manually each session since WSL does not run systemd by default. You can add the two `sudo service` commands to your `~/.bashrc` to automate this.
-
-**5. Verify the installations**
-
-```bash
-gcc --version
-pkg-config --libs libsodium
-pkg-config --libs openssl
-pkg-config --libs libcjson
-```
-
----
+> **Note:** On WSL, you may need to start these services manually each session since WSL does not run systemd by default.
 
 ## Build
 
